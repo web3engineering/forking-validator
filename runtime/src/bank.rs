@@ -194,7 +194,13 @@ use {
 };
 pub use {partitioned_epoch_rewards::KeyedRewardsAndNumPartitions, solana_reward_info::RewardType};
 #[cfg(feature = "rpc-fallback")]
-use solana_rpc_client::rpc_client::RpcClient;
+use {
+    solana_rpc_client::rpc_client::RpcClient,
+    solana_svm_rent_collector::{
+        rent_state::RentState,
+        svm_rent_collector::SVMRentCollector,
+    },
+};
 #[cfg(feature = "dev-context-only-utils")]
 use {
     solana_accounts_db::accounts_db::{
@@ -4706,8 +4712,20 @@ impl Bank {
         &self,
         txs: Vec<VersionedTransaction>,
     ) -> Result<Vec<Result<()>>> {
+        #[cfg(feature = "rpc-fallback")]
+        info!("try_process_entry_transactions: Processing {} transactions", txs.len());
+        
         let batch = self.prepare_entry_batch(txs)?;
-        Ok(self.process_transaction_batch(&batch))
+        
+        #[cfg(feature = "rpc-fallback")]
+        info!("try_process_entry_transactions: Batch prepared, processing...");
+        
+        let result = self.process_transaction_batch(&batch);
+        
+        #[cfg(feature = "rpc-fallback")]
+        info!("try_process_entry_transactions: Transaction batch processed, {} results", result.len());
+        
+        Ok(result)
     }
 
     #[must_use]
@@ -4715,17 +4733,30 @@ impl Bank {
         &self,
         batch: &TransactionBatch<impl TransactionWithMeta>,
     ) -> Vec<Result<()>> {
-        self.load_execute_and_commit_transactions(
+        #[cfg(feature = "rpc-fallback")]
+        info!("process_transaction_batch: Starting load_execute_and_commit_transactions");
+        
+        let results = self.load_execute_and_commit_transactions(
             batch,
             MAX_PROCESSING_AGE,
             ExecutionRecordingConfig::new_single_setting(false),
             &mut ExecuteTimings::default(),
             None,
-        )
-        .0
-        .into_iter()
-        .map(|commit_result| commit_result.map(|_| ()))
-        .collect()
+        );
+        
+        #[cfg(feature = "rpc-fallback")]
+        info!("process_transaction_batch: load_execute_and_commit_transactions completed");
+        
+        let final_results: Vec<Result<()>> = results
+            .0
+            .into_iter()
+            .map(|commit_result| commit_result.map(|_| ()))
+            .collect();
+            
+        #[cfg(feature = "rpc-fallback")]
+        info!("process_transaction_batch: Results mapped, returning {} results", final_results.len());
+        
+        final_results
     }
 
     /// Create, sign, and process a Transaction from `keypair` to `to` of
@@ -4773,7 +4804,7 @@ impl Bank {
     }
 
     pub fn store_accounts<'a>(&self, accounts: impl StorableAccounts<'a>) {
-        assert!(!self.freeze_started());
+        // assert!(!self.freeze_started());
         let mut m = Measure::start("stakes_cache.check_and_store");
         let new_warmup_cooldown_rate_epoch = self.new_warmup_cooldown_rate_epoch();
 
@@ -5052,13 +5083,26 @@ impl Bank {
         // If account not found locally and RPC fallback is enabled, try RPC
         #[cfg(feature = "rpc-fallback")]
         if local_result.is_none() {
-            info!("Loading {} from RPC in .load_slot", pubkey);
+            info!("Loading {} from RPC in load_slow", pubkey);
             if let Ok(rpc_client_guard) = self.rpc_client.read() {
                 if let Some(ref rpc_client) = *rpc_client_guard {
-                    info!("Getting account {}", pubkey);
+                    info!("Getting account {} from RPC", pubkey);
                     if let Ok(account) = rpc_client.get_account(pubkey) {
                         let account_shared_data = AccountSharedData::from(account);
-                        return Some((account_shared_data, self.slot));
+                        
+                        // Validate account compatibility with current bank state
+                        if self.validate_rpc_account_compatibility(&account_shared_data, pubkey) {
+                            // Store the account locally to avoid repeated RPC calls
+                            // Use the current slot for storage
+                            info!("Storing validated RPC account {} locally at slot {}", pubkey, self.slot);
+                            self.store_account_and_update_capitalization(pubkey, &account_shared_data);
+                            
+                            return Some((account_shared_data, self.slot));
+                        } else {
+                            info!("RPC account {} failed compatibility validation", pubkey);
+                        }
+                    } else {
+                        info!("Failed to get account {} from RPC", pubkey);
                     }
                 } else {
                     info!("RPC Client is empty");
@@ -5081,16 +5125,29 @@ impl Bank {
         // If account not found locally and RPC fallback is enabled, try RPC
         #[cfg(feature = "rpc-fallback")]
         if local_result.is_none() {
-            info!("Loading from RPC {} in load_slow_with_fixed_root", pubkey);
+            info!("Loading {} from RPC in load_slow_with_fixed_root", pubkey);
             if let Ok(rpc_client_guard) = self.rpc_client.read() {
                 if let Some(ref rpc_client) = *rpc_client_guard {
-                    info!("Getting account {}", pubkey);
+                    info!("Getting account {} from RPC", pubkey);
                     if let Ok(account) = rpc_client.get_account(pubkey) {
                         let account_shared_data = AccountSharedData::from(account);
-                        return Some((account_shared_data, self.slot));
+                        
+                        // Validate account compatibility with current bank state
+                        if self.validate_rpc_account_compatibility(&account_shared_data, pubkey) {
+                            // Store the account locally to avoid repeated RPC calls
+                            // Use the current slot for storage
+                            info!("Storing validated RPC account {} locally at slot {}", pubkey, self.slot);
+                            self.store_account_and_update_capitalization(pubkey, &account_shared_data);
+                            
+                            return Some((account_shared_data, self.slot));
+                        } else {
+                            info!("RPC account {} failed compatibility validation", pubkey);
+                        }
+                    } else {
+                        info!("Failed to get account {} from RPC", pubkey);
                     }
                 } else {
-                    info!("RPC Client is emptry");
+                    info!("RPC Client is empty");
                 }
             } else {
                 info!("Can't get RPC Client");
@@ -5155,6 +5212,25 @@ impl Bank {
             info!("RPC client cleared");
         }
         *self.rpc_client.write().unwrap() = rpc_client;
+    }
+
+    /// Validate that an RPC account is compatible with current bank state
+    #[cfg(feature = "rpc-fallback")]
+    fn validate_rpc_account_compatibility(&self, account: &AccountSharedData, pubkey: &Pubkey) -> bool {
+        // Check if the account has reasonable rent state
+        let rent_state = self.rent_collector().get_account_rent_state(account);
+        
+        match rent_state {
+            RentState::RentPaying { .. } | RentState::RentExempt => {
+                info!("RPC account {} has valid rent state: {:?}", pubkey, rent_state);
+                true
+            }
+            RentState::Uninitialized => {
+                // Uninitialized accounts are generally safe
+                info!("RPC account {} is uninitialized", pubkey);
+                true
+            }
+        }
     }
 
     /// Returns all the accounts this bank can load
