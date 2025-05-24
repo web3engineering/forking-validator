@@ -144,6 +144,10 @@ fn main() {
         .map(normalize_to_url_if_moniker)
         .map(RpcClient::new);
 
+    let fallback_rpc_url = value_t!(matches, "rpc_fallback_url", String)
+        .map(normalize_to_url_if_moniker)
+        .ok();
+
     let (mint_address, random_mint) = pubkey_of(&matches, "mint_address")
         .map(|pk| (pk, false))
         .unwrap_or_else(|| {
@@ -568,6 +572,10 @@ fn main() {
 
     if let Some(compute_unit_limit) = compute_unit_limit {
         genesis.compute_unit_limit(compute_unit_limit);
+    }
+
+    if let Some(ref fallback_url) = fallback_rpc_url {
+        genesis.rpc_fallback_url(fallback_url.clone());
     }
 
     match genesis.start_with_mint_address_and_geyser_plugin_rpc(

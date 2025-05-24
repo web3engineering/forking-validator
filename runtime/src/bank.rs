@@ -193,6 +193,8 @@ use {
     },
 };
 pub use {partitioned_epoch_rewards::KeyedRewardsAndNumPartitions, solana_reward_info::RewardType};
+#[cfg(feature = "rpc-fallback")]
+use solana_rpc_client::rpc_client::RpcClient;
 #[cfg(feature = "dev-context-only-utils")]
 use {
     solana_accounts_db::accounts_db::{
@@ -586,6 +588,8 @@ impl PartialEq for Bank {
             stats_for_accounts_lt_hash: _,
             block_id,
             bank_hash_stats: _,
+            #[cfg(feature = "rpc-fallback")]
+            rpc_client: _,
             // Ignore new fields explicitly if they do not impact PartialEq.
             // Adding ".." will remove compile-time checks that if a new field
             // is added to the struct, this PartialEq is accordingly updated.
@@ -944,6 +948,10 @@ pub struct Bank {
 
     /// Accounts stats for computing the bank hash
     bank_hash_stats: AtomicBankHashStats,
+
+    /// Optional RPC client for account fallback fetching
+    #[cfg(feature = "rpc-fallback")]
+    rpc_client: RwLock<Option<Arc<solana_rpc_client::rpc_client::RpcClient>>>,
 }
 
 #[derive(Debug)]
@@ -1143,6 +1151,8 @@ impl Bank {
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(None),
             bank_hash_stats: AtomicBankHashStats::default(),
+            #[cfg(feature = "rpc-fallback")]
+            rpc_client: RwLock::new(None),
         };
 
         bank.transaction_processor =
@@ -1399,6 +1409,8 @@ impl Bank {
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(None),
             bank_hash_stats: AtomicBankHashStats::default(),
+            #[cfg(feature = "rpc-fallback")]
+            rpc_client: RwLock::new(parent.rpc_client.read().unwrap().clone()),
         };
 
         let (_, ancestors_time_us) = measure_us!({
@@ -1876,6 +1888,8 @@ impl Bank {
             stats_for_accounts_lt_hash: AccountsLtHashStats::default(),
             block_id: RwLock::new(None),
             bank_hash_stats: AtomicBankHashStats::new(&fields.bank_hash_stats),
+            #[cfg(feature = "rpc-fallback")]
+            rpc_client: RwLock::new(None),
         };
 
         bank.transaction_processor =
@@ -5033,7 +5047,28 @@ impl Bank {
         // get_account (= primary this fn caller) may be called from on-chain Bank code even if we
         // try hard to use get_account_with_fixed_root for that purpose...
         // so pass safer LoadHint:Unspecified here as a fallback
-        self.rc.accounts.load_without_fixed_root(ancestors, pubkey)
+        let local_result = self.rc.accounts.load_without_fixed_root(ancestors, pubkey);
+        
+        // If account not found locally and RPC fallback is enabled, try RPC
+        #[cfg(feature = "rpc-fallback")]
+        if local_result.is_none() {
+            info!("Loading {} from RPC in .load_slot", pubkey);
+            if let Ok(rpc_client_guard) = self.rpc_client.read() {
+                if let Some(ref rpc_client) = *rpc_client_guard {
+                    info!("Getting account {}", pubkey);
+                    if let Ok(account) = rpc_client.get_account(pubkey) {
+                        let account_shared_data = AccountSharedData::from(account);
+                        return Some((account_shared_data, self.slot));
+                    }
+                } else {
+                    info!("RPC Client is empty");
+                }
+            } else {
+                info!("Can't get RPC client");
+            }
+        }
+        
+        local_result
     }
 
     fn load_slow_with_fixed_root(
@@ -5041,7 +5076,28 @@ impl Bank {
         ancestors: &Ancestors,
         pubkey: &Pubkey,
     ) -> Option<(AccountSharedData, Slot)> {
-        self.rc.accounts.load_with_fixed_root(ancestors, pubkey)
+        let local_result = self.rc.accounts.load_with_fixed_root(ancestors, pubkey);
+        
+        // If account not found locally and RPC fallback is enabled, try RPC
+        #[cfg(feature = "rpc-fallback")]
+        if local_result.is_none() {
+            info!("Loading from RPC {} in load_slow_with_fixed_root", pubkey);
+            if let Ok(rpc_client_guard) = self.rpc_client.read() {
+                if let Some(ref rpc_client) = *rpc_client_guard {
+                    info!("Getting account {}", pubkey);
+                    if let Ok(account) = rpc_client.get_account(pubkey) {
+                        let account_shared_data = AccountSharedData::from(account);
+                        return Some((account_shared_data, self.slot));
+                    }
+                } else {
+                    info!("RPC Client is emptry");
+                }
+            } else {
+                info!("Can't get RPC Client");
+            }
+        }
+        
+        local_result
     }
 
     pub fn get_program_accounts(
@@ -5088,6 +5144,17 @@ impl Bank {
 
     pub fn account_indexes_include_key(&self, key: &Pubkey) -> bool {
         self.rc.accounts.account_indexes_include_key(key)
+    }
+
+    /// Set an RPC client for account fallback fetching
+    #[cfg(feature = "rpc-fallback")]
+    pub fn set_rpc_client(&self, rpc_client: Option<Arc<RpcClient>>) {
+        if rpc_client.is_some() {
+            info!("RPC client set for fallback functionality");
+        } else {
+            info!("RPC client cleared");
+        }
+        *self.rpc_client.write().unwrap() = rpc_client;
     }
 
     /// Returns all the accounts this bank can load

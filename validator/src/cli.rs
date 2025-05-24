@@ -1024,6 +1024,18 @@ pub fn test_app<'a>(version: &'a str, default_args: &'a DefaultTestArgs) -> App<
                      already exists then this parameter is silently ignored",
                 ),
         )
+        .arg(
+            Arg::with_name("rpc_fallback_url")
+                .long("rpc-fallback-url")
+                .value_name("URL_OR_MONIKER")
+                .takes_value(true)
+                .validator(is_url_or_moniker)
+                .help(
+                    "URL for RPC fallback when accounts are not found locally. \
+                     Enables fork testing by fetching missing accounts from a live network \
+                     (e.g., mainnet-beta). Accepts the same URL or moniker format as --url",
+                ),
+        )
 }
 
 pub struct DefaultTestArgs {

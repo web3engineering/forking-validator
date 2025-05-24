@@ -44,7 +44,7 @@ solana-rent = { workspace = true }
 solana-rpc = { workspace = true }
 solana-rpc-client = { workspace = true }
 solana-rpc-client-api = { workspace = true }
-solana-runtime = { workspace = true }
+solana-runtime = { workspace = true, features = ["rpc-fallback"] }
 solana-sdk-ids = { workspace = true }
 solana-signer = { workspace = true }
 solana-streamer = { workspace = true }

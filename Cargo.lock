@@ -10107,6 +10107,7 @@ dependencies = [
  "solana-rent-collector",
  "solana-rent-debits",
  "solana-reward-info",
+ "solana-rpc-client",
  "solana-runtime",
  "solana-runtime-transaction",
  "solana-sdk",

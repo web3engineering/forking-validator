@@ -133,6 +133,8 @@ pub struct TestValidatorGenesis {
     pub tpu_enable_udp: bool,
     pub geyser_plugin_manager: Arc<RwLock<GeyserPluginManager>>,
     admin_rpc_service_post_init: Arc<RwLock<Option<AdminRpcRequestMetadataPostInit>>>,
+    /// Optional RPC URL for account fallback (e.g., mainnet-beta for forking)
+    pub rpc_fallback_url: Option<String>,
 }
 
 impl Default for TestValidatorGenesis {
@@ -166,6 +168,7 @@ impl Default for TestValidatorGenesis {
             geyser_plugin_manager: Arc::new(RwLock::new(GeyserPluginManager::new())),
             admin_rpc_service_post_init:
                 Arc::<RwLock<Option<AdminRpcRequestMetadataPostInit>>>::default(),
+            rpc_fallback_url: None,
         }
     }
 }
@@ -301,6 +304,14 @@ impl TestValidatorGenesis {
 
     pub fn compute_unit_limit(&mut self, compute_unit_limit: u64) -> &mut Self {
         self.compute_unit_limit = Some(compute_unit_limit);
+        self
+    }
+
+    /// Set RPC URL to use for account fallback when accounts are not found locally
+    /// This enables fork testing where you can start with minimal state but fetch
+    /// missing accounts from a live network (e.g., mainnet-beta) as needed
+    pub fn rpc_fallback_url<S: Into<String>>(&mut self, url: S) -> &mut Self {
+        self.rpc_fallback_url = Some(url.into());
         self
     }
 
@@ -1057,6 +1068,12 @@ impl TestValidator {
             validator,
             vote_account_address,
         };
+
+        // Set up RPC fallback if URL is provided
+        if let Some(ref fallback_url) = config.rpc_fallback_url {
+            test_validator.setup_rpc_fallback(fallback_url);
+        }
+
         Ok(test_validator)
     }
 
@@ -1162,6 +1179,21 @@ impl TestValidator {
 
     pub fn repair_whitelist(&self) -> Arc<RwLock<HashSet<Pubkey>>> {
         Arc::new(RwLock::new(HashSet::default()))
+    }
+
+    /// Set up RPC fallback for account loading from an external RPC endpoint
+    /// This enables fork testing where missing accounts can be fetched from a live network
+    pub fn setup_rpc_fallback(&self, rpc_url: &str) {
+        use std::sync::Arc;
+        use solana_rpc_client::rpc_client::RpcClient;
+
+        let rpc_client = Arc::new(RpcClient::new(rpc_url));
+        let bank_forks = self.bank_forks();
+        let bank_forks_read = bank_forks.read().unwrap();
+        let working_bank = bank_forks_read.working_bank();
+        
+        // Set the RPC client on the working bank (now works with RwLock)
+        working_bank.set_rpc_client(Some(rpc_client));
     }
 }
 
