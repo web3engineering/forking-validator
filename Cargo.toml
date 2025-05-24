@@ -557,7 +557,7 @@ solana-sysvar = "2.2.2"
 solana-sysvar-id = "2.2.1"
 solana-test-validator = { path = "test-validator", version = "=2.3.0" }
 solana-thin-client = { path = "thin-client", version = "=2.3.0" }
-solana-transaction = "2.2.2"
+solana-transaction = "2.2.3"
 solana-transaction-error = "2.2.1"
 solana-tpu-client = { path = "tpu-client", version = "=2.3.0", default-features = false }
 solana-tpu-client-next = { path = "tpu-client-next", version = "=2.3.0" }
