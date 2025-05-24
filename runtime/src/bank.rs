@@ -7009,11 +7009,32 @@ impl TransactionProcessingCallback for Bank {
     }
 
     fn get_account_shared_data(&self, pubkey: &Pubkey) -> Option<AccountSharedData> {
-        self.rc
+        let local_result = self.rc
             .accounts
             .accounts_db
             .load_with_fixed_root(&self.ancestors, pubkey)
-            .map(|(acc, _)| acc)
+            .map(|(acc, _)| acc);
+        
+        // If account not found locally and RPC fallback is enabled, try RPC
+        #[cfg(feature = "rpc-fallback")]
+        if local_result.is_none() {
+            info!("Loading {} from RPC in get_account_shared_data", pubkey);
+            if let Ok(rpc_client_guard) = self.rpc_client.read() {
+                if let Some(ref rpc_client) = *rpc_client_guard {
+                    info!("Getting account {}", pubkey);
+                    if let Ok(account) = rpc_client.get_account(pubkey) {
+                        let account_shared_data = AccountSharedData::from(account);
+                        return Some(account_shared_data);
+                    }
+                } else {
+                    info!("RPC Client is empty");
+                }
+            } else {
+                info!("Can't get RPC client");
+            }
+        }
+        
+        local_result
     }
 
     // NOTE: must hold idempotent for the same set of arguments
